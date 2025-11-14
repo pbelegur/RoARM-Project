@@ -1,0 +1,53 @@
+<html>
+    <head>
+        <title>network-xr-camera test page</title>
+        <meta charset='utf-8'>
+        <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+    </head>
+    <body>
+        <h1>network-xr-camera test page</h1>
+        <img width="100%" id="video">
+        <div id="info"></div>
+    </body>
+
+    <!-- <script type="module">
+        var st = 'ws://' + location.hostname + ":" + location.port + "/jpgstream_client";
+        console.log(st);
+        document.getElementById('info').innerHTML = '<h2>WebSocket URL: ' + st + '</h2>';
+        var ws = new WebSocket(st);
+        ws.onmessage = function (event) {
+            var img = document.getElementById('video');
+            img.src = event.data;
+        };
+    </script> -->
+    <script>
+    // Build websocket URL
+    const st = 'ws://' + location.hostname + ":" + location.port + "/jpgstream_client";
+    console.log(st);
+
+    document.getElementById('info').innerHTML = '<h2>WebSocket URL: ' + st + '</h2>';
+
+    // Connect to WebSocket
+    const ws = new WebSocket(st);
+    ws.binaryType = "arraybuffer";   // IMPORTANT
+
+    ws.onmessage = function (event) {
+        // Convert raw binary → JPEG blob
+        const blob = new Blob([event.data], { type: "image/jpeg" });
+
+        // Create temporary object URL
+        const url = URL.createObjectURL(blob);
+
+        // Set it as image source
+        const img = document.getElementById('video');
+        img.src = url;
+
+        // Release memory
+        setTimeout(() => URL.revokeObjectURL(url), 50);
+    };
+
+    ws.onopen = () => console.log("WS CONNECTED");
+    ws.onerror = (err) => console.error("WS ERROR:", err);
+</script>
+
+</html>
