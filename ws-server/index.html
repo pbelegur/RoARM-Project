@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ESP32-S3 WebSocket Live Stream</title>
+  <script src="https://mrdoob.github.io/stats.js/build/stats.min.js"></script>
+  <style>
+    body {
+      background: #111;
+      color: white;
+      text-align: center;
+      font-family: Arial, sans-serif;
+      margin-top: 40px;
+    }
+    #frame {
+      width: 640px;
+      height: auto;
+      border: 4px solid #4caf50;
+      border-radius: 10px;
+      margin-bottom: 15px;
+    }
+    #status {
+      color: #ccc;
+      font-size: 18px;
+    }
+    #fps {
+      color: #4caf50;
+      font-size: 20px;
+      margin-top: 8px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h2>ESP32-S3 WebSocket Live Stream</h2>
+  <img id="frame" src="" alt="Waiting for frames..." />
+  <p id="status">Connecting...</p>
+  <p id="fps">FPS: 0</p>
+
+  <script>
+    // 🧠 Initialize Stats.js for FPS monitoring
+    const stats = new Stats();
+    stats.showPanel(0); // 0: FPS panel
+    document.body.appendChild(stats.dom);
+    stats.dom.style.position = 'fixed';
+    stats.dom.style.left = '10px';
+    stats.dom.style.top = '10px';
+
+    // 🎥 WebSocket setup
+    const ws = new WebSocket("ws://192.168.181.150:8765"); // ✅ your PC IP
+    ws.binaryType = "arraybuffer";
+
+    const img = document.getElementById("frame");
+    const status = document.getElementById("status");
+    const fpsLabel = document.getElementById("fps");
+
+    let frameCount = 0, lastTime = performance.now();
+
+    ws.onopen = () => { status.textContent = "✅ Connected!"; };
+    ws.onclose = () => { status.textContent = "❌ Disconnected"; };
+    ws.onerror = () => { status.textContent = "⚠️ Error"; };
+
+    ws.onmessage = (event) => {
+      stats.begin(); // start FPS timing
+
+      if (event.data instanceof ArrayBuffer) {
+        frameCount++;
+
+        const blob = new Blob([event.data], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        img.src = url;
+        setTimeout(() => URL.revokeObjectURL(url), 200);
+
+        const now = performance.now();
+        if (now - lastTime >= 1000) {
+          fpsLabel.textContent = `FPS: ${frameCount}`;
+          frameCount = 0;
+          lastTime = now;
+        }
+      }
+
+      stats.end(); // stop FPS timing
+    };
+  </script>
+</body>
+</html>
