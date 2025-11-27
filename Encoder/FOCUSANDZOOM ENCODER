@@ -1,0 +1,203 @@
+// ESP32-C3 dual encoder -> FreeD over WiFi UDP
+// Encoder 1 = Zoom
+// Encoder 2 = Focus
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+#define A1 18    // Encoder 1 channel A
+#define B1 19    // Encoder 1 channel B
+#define A2 5     // Encoder 2 channel A
+#define B2 6     // Encoder 2 channel B
+#define CPR 2400 // counts per revolution (600 PPR × 4 edges)
+
+// -------- WiFi + UDP config --------
+const char* WIFI_SSID     = "LGMesaroof";
+const char* WIFI_PASSWORD = "12345678";
+
+IPAddress freedTarget(10, 0, 0, 11); // PC / laptop IP on Wi-Fi
+const uint16_t freedPort = 5555;     // UDP port to send FreeD
+
+WiFiUDP udp;
+
+// -------- Encoder state --------
+volatile long pos1 = 0;
+volatile long pos2 = 0;
+long last_full_rot1 = 0;
+long last_full_rot2 = 0;
+long rev_count1 = 0;
+long rev_count2 = 0;
+
+// Calibration: map raw encoder counts to 0..4095 for Zoom/Focus
+// TODO: after testing, update these with your real min/max.
+const long ZOOM_MIN_COUNTS  = -60000;   // encoder1 at zoom minimum
+const long ZOOM_MAX_COUNTS  =  60000;   // encoder1 at zoom maximum
+const long FOCUS_MIN_COUNTS = -2000;   // encoder2 at focus near
+const long FOCUS_MAX_COUNTS =  8000;   // encoder2 at focus far
+
+// --- Encoder 1 ISR ---
+void IRAM_ATTR handleA1() {
+  int a = digitalRead(A1);
+  int b = digitalRead(B1);
+  if (a == b) pos1++; else pos1--;
+}
+
+// --- Encoder 2 ISR ---
+void IRAM_ATTR handleA2() {
+  int a = digitalRead(A2);
+  int b = digitalRead(B2);
+  if (a == b) pos2++; else pos2--;
+}
+
+// -------- Helpers --------
+
+// Map long range [inMin, inMax] -> 0..4095 (12-bit)
+int mapTo12bit(long x, long inMin, long inMax) {
+  if (x < inMin) x = inMin;
+  if (x > inMax) x = inMax;
+  long num = (x - inMin) * 4095L;
+  long den = (inMax - inMin);
+  if (den == 0) return 0;
+  return (int)(num / den);
+}
+
+// Encode signed 32-bit value into 3-byte big-endian (FreeD style)
+void encode24(uint8_t *dst, int32_t value) {
+  dst[0] = (value >> 16) & 0xFF;
+  dst[1] = (value >> 8)  & 0xFF;
+  dst[2] = value & 0xFF;
+}
+
+// Build + send one FreeD packet over UDP.
+// Only Zoom/Focus are used; everything else is zero.
+void sendFreeDPacket(int zoomVal, int focusVal) {
+  uint8_t buf[29];
+
+  // 0: message type
+  buf[0] = 0xD1;
+
+  // 1: camera ID (0–255, arbitrary)
+  buf[1] = 0x01;
+
+  // Pitch, Yaw, Roll, PosZ, PosY, PosX all zero for now.
+  int32_t zero = 0;
+  encode24(&buf[2],  zero); // Pitch
+  encode24(&buf[5],  zero); // Yaw
+  encode24(&buf[8],  zero); // Roll
+  encode24(&buf[11], zero); // PosZ
+  encode24(&buf[14], zero); // PosY
+  encode24(&buf[17], zero); // PosX
+
+  // Zoom / Focus:
+  // We send them as 24-bit ints, offset by 524288 (0x80000),
+  // which is how many systems expect lens values.
+  int32_t zoomRaw  = 524288 + zoomVal;
+  int32_t focusRaw = 524288 + focusVal;
+
+  encode24(&buf[20], zoomRaw);   // Zoom
+  encode24(&buf[23], focusRaw);  // Focus
+
+  // Reserved
+  buf[26] = 0x00;
+  buf[27] = 0x00;
+
+  // Checksum of first 28 bytes:
+  // start at 0x40 and subtract each byte (mod 256)
+  uint32_t cksum = 0x40;
+  for (int i = 0; i < 28; i++) {
+    cksum -= (uint32_t)buf[i];
+  }
+  cksum &= 0xFF;
+  buf[28] = (uint8_t)cksum;
+
+  // Send over UDP
+  udp.beginPacket(freedTarget, freedPort);
+  udp.write(buf, sizeof(buf));
+  udp.endPacket();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Encoder 1 setup
+  pinMode(A1, INPUT_PULLUP);
+  pinMode(B1, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(A1), handleA1, CHANGE);
+
+  // Encoder 2 setup
+  pinMode(A2, INPUT_PULLUP);
+  pinMode(B2, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(A2), handleA2, CHANGE);
+
+  Serial.println();
+  Serial.println("Dual Encoder + FreeD over UDP");
+  Serial.println("Rotate slowly for best accuracy.\n");
+
+  // Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("WiFi connected, ESP32 IP: ");
+  Serial.println(WiFi.localIP());
+
+  // UDP (use any local port, 0 = auto)
+  udp.begin(0);
+  Serial.print("Sending FreeD to ");
+  Serial.print(freedTarget);
+  Serial.print(":");
+  Serial.println(freedPort);
+}
+
+void loop() {
+  static uint32_t lastPrint = 0;
+  uint32_t now = millis();
+
+  if (now - lastPrint >= 200) {  // 5 Hz; change to 20 for 50 Hz
+    // Copy volatile positions once
+    long p1 = pos1;
+    long p2 = pos2;
+
+    // --- Encoder 1 (Zoom) debug ---
+    long wrapped1 = ((p1 % CPR) + CPR) % CPR;
+    float angle1 = (wrapped1 / (float)CPR) * 360.0f;
+    long diff1 = p1 - last_full_rot1;
+    if (abs(diff1) >= CPR) {
+      rev_count1 += (diff1 > 0) ? 1 : -1;
+      last_full_rot1 = p1;
+      Serial.printf("*** ENCODER 1 FULL ROTATION #%ld ***\n", rev_count1);
+    }
+
+    // --- Encoder 2 (Focus) debug ---
+    long wrapped2 = ((p2 % CPR) + CPR) % CPR;
+    float angle2 = (wrapped2 / (float)CPR) * 360.0f;
+    long diff2 = p2 - last_full_rot2;
+    if (abs(diff2) >= CPR) {
+      rev_count2 += (diff2 > 0) ? 1 : -1;
+      last_full_rot2 = p2;
+      Serial.printf("*** ENCODER 2 FULL ROTATION #%ld ***\n", rev_count2);
+    }
+
+    // Map counts to 0..4095 for Zoom / Focus
+    int zoomVal  = mapTo12bit(p1, ZOOM_MIN_COUNTS,  ZOOM_MAX_COUNTS);
+    int focusVal = mapTo12bit(p2, FOCUS_MIN_COUNTS, FOCUS_MAX_COUNTS);
+
+    // Serial debug
+    Serial.printf(
+      "E1 -> pos=%ld  angle=%.2f°  revs=%ld  zoom=%d | "
+      "E2 -> pos=%ld  angle=%.2f°  revs=%ld  focus=%d\n",
+      p1, angle1, rev_count1, zoomVal,
+      p2, angle2, rev_count2, focusVal
+    );
+
+    // Send FreeD packet
+    sendFreeDPacket(zoomVal, focusVal);
+
+    lastPrint = now;
+  }
+}
