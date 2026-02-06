@@ -26,12 +26,12 @@ void setup() {
 void loop() {}
 
 
-// 0x68
+// 0x69
 #include <Wire.h>
 
 static const int SDA_A = 41;
 static const int SCL_A = 40;
-static const uint8_t ADDR = 0x68;
+static const uint8_t ADDR = 0x69;
 
 void setup() {
   Serial.begin(115200);
